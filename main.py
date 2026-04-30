@@ -75,7 +75,7 @@ async def ejecutar_rag_logic(query: str):
         
         completion = client_groq.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
-            model="llama3-8b-8192",
+            model="llama-3.1-8b-instant",
         )
         return completion.choices[0].message.content
     except Exception as e:
