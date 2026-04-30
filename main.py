@@ -3,109 +3,102 @@ from fastapi import FastAPI, HTTPException
 from supabase import create_client, Client
 from sentence_transformers import SentenceTransformer
 from groq import Groq
+from mcp.server.fastapi import FastApiServer
+from mcp.server import Server
+from mcp.types import Tool, TextContent
 
-# --- CONFIGURACIÓN DE VARIABLES DE ENTORNO ---
-# Estas se deben configurar en el panel de Render -> Environment
+# --- CONFIGURACIÓN ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-# --- INICIALIZACIÓN DE CLIENTES ---
-# Verificación de seguridad para asegurar que las llaves estén presentes
-if not all([SUPABASE_URL, SUPABASE_KEY, GROQ_API_KEY]):
-    print("CRITICAL ERROR: Faltan variables de entorno en el servidor.")
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 groq_client = Groq(api_key=GROQ_API_KEY)
+model = SentenceTransformer('paraphrase-albert-small-v2', device='cpu', trust_remote_code=True)
 
-# --- CARGA DEL MODELO OPTIMIZADA PARA RAM < 512MB ---
-# Usamos un modelo ALBERT por ser extremadamente eficiente en memoria
-try:
-    model = SentenceTransformer(
-        'paraphrase-albert-small-v2', 
-        device='cpu', 
-        trust_remote_code=True
+# --- INICIALIZACIÓN MCP ---
+mcp_server = Server("johadooruri-brain")
+app = FastAPI(title="JohaDoorUri RAG + MCP")
+
+# --- LÓGICA CORE (Reutilizable) ---
+
+async def run_ingest(text: str):
+    vector = model.encode(text).tolist()
+    supabase.table("documents").insert({
+        "content": text,
+        "embedding": vector,
+        "metadata": {"source": "mcp_ingest"}
+    }).execute()
+    return f"Información indexada: {text[:50]}..."
+
+async def run_ask(question: str):
+    q_vector = model.encode(question).tolist()
+    rpc_res = supabase.rpc("match_documents", {
+        "query_embedding": q_vector,
+        "match_threshold": 0.35,
+        "match_count": 3
+    }).execute()
+    
+    context = "\n".join([d['content'] for d in rpc_res.data]) if rpc_res.data else "Sin contexto."
+    prompt = f"Contexto: {context}\n\nPregunta: {question}\n\nRespuesta técnica:"
+    
+    completion = groq_client.chat.completions.create(
+        model="llama-3.1-8b-instant",
+        messages=[{"role": "user", "content": prompt}]
     )
-except Exception as e:
-    print(f"Error fatal al cargar el modelo de embeddings: {e}")
+    return completion.choices[0].message.content
 
-app = FastAPI(title="RAG Service - JohaDoorUri")
+# --- REGISTRO DE HERRAMIENTAS MCP ---
 
-@app.get("/")
-def home():
-    return {
-        "message": "RAG Service is Online", 
-        "status": "ready",
-        "model": "paraphrase-albert-small-v2"
-    }
+@mcp_server.list_tools()
+async def handle_list_tools() -> list[Tool]:
+    return [
+        Tool(
+            name="aprender_dato",
+            description="Guarda nueva información técnica en la memoria a largo plazo.",
+            inputSchema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        ),
+        Tool(
+            name="consultar_cerebro",
+            description="Busca en la base de datos de conocimientos para responder preguntas.",
+            inputSchema={
+                "type": "object",
+                "properties": {"question": {"type": "string"}},
+                "required": ["question"],
+            },
+        ),
+    ]
+
+@mcp_server.call_tool()
+async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
+    if name == "aprender_dato":
+        msg = await run_ingest(arguments["text"])
+        return [TextContent(type="text", text=msg)]
+    elif name == "consultar_cerebro":
+        answer = await run_ask(arguments["question"])
+        return [TextContent(type="text", text=answer)]
+    raise ValueError(f"Herramienta no encontrada: {name}")
+
+# --- ENDPOINTS HTTP Y MCP ---
 
 @app.get("/health")
-def health():
-    """Ruta de verificación para que Render mantenga el servicio activo"""
-    return {"status": "ok"}
+def health(): return {"status": "ok"}
 
+# Rutas URL tradicionales (para que sigas usando tus links)
 @app.get("/ingest")
-async def ingest_text(text: str):
-    """Convierte texto en vectores y lo guarda en la base de datos Supabase"""
-    if not text:
-        raise HTTPException(status_code=400, detail="El texto está vacío")
-    
-    try:
-        # Generar el vector numérico (Embedding)
-        vector = model.encode(text).tolist()
-        
-        # Guardar en la tabla 'documents' de Supabase
-        data = {
-            "content": text,
-            "embedding": vector,
-            "metadata": {"source": "manual_upload"}
-        }
-        supabase.table("documents").insert(data).execute()
-        
-        return {"status": "success", "message": "Información indexada correctamente"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en ingesta: {str(e)}")
+async def ingest_endpoint(text: str):
+    res = await run_ingest(text)
+    return {"status": "success", "detail": res}
 
 @app.get("/ask")
-async def ask_question(question: str):
-    """Flujo RAG: Recupera contexto de Supabase y genera respuesta con Groq"""
-    if not question:
-        raise HTTPException(status_code=400, detail="La pregunta está vacía")
-    
-    try:
-        # 1. RETRIEVAL: Convertir pregunta a vector
-        q_vector = model.encode(question).tolist()
-        
-        # 2. BÚSQUEDA VECTORIAL: Consultar Supabase mediante la función RPC
-        rpc_res = supabase.rpc("match_documents", {
-            "query_embedding": q_vector,
-            "match_threshold": 0.35,
-            "match_count": 3
-        }).execute()
-        
-        # Extraer el contenido recuperado
-        if not rpc_res.data:
-            context = "No hay información disponible en la base de datos."
-        else:
-            context = "\n".join([d['content'] for d in rpc_res.data])
+async def ask_endpoint(question: str):
+    res = await run_ask(question)
+    return {"answer": res}
 
-        # 3. GENERATION: Crear el prompt enriquecido para el LLM (Llama 3)
-        prompt = (
-            f"Contexto relevante:\n{context}\n\n"
-            f"Pregunta del usuario: {question}\n\n"
-            f"Instrucción: Responde de forma técnica y profesional basada únicamente en el contexto proporcionado."
-        )
-        
-        completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.4
-        )
-
-        return {
-            "answer": completion.choices[0].message.content,
-            "context_used": [d['content'] for d in rpc_res.data] if rpc_res.data else []
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en flujo RAG: {str(e)}")
+# Montar el transporte MCP (Server-Sent Events)
+mcp_app = FastApiServer(mcp_server)
+app.mount("/mcp", mcp_app)
