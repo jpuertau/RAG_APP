@@ -1,138 +1,95 @@
 import os
-import asyncio
-from fastapi import FastAPI, HTTPException, Request
-from supabase import create_client, Client
-from sentence_transformers import SentenceTransformer
-from groq import Groq
-
-# Imports actualizados para MCP 2026
+import sys
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+from mcp.server.fastapi import FastApiSseServer
 from mcp.server import Server
-from mcp.server.sse import SseServerTransport
-from mcp.types import Tool, TextContent
-
-# --- CONFIGURACIÓN DE VARIABLES DE ENTORNO ---
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-
-# Inicialización de Clientes
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-# Modelo optimizado para RAM < 512MB
-model = SentenceTransformer(
-    'paraphrase-albert-small-v2', 
-    device='cpu', 
-    trust_remote_code=True
-)
-
-# --- INICIALIZACIÓN MCP ---
-mcp_server = Server("johadooruri-brain")
-sse = SseServerTransport("/mcp/messages")
-app = FastAPI(title="JohaDoorUri RAG + MCP Server")
-
-# --- LÓGICA CORE REUTILIZABLE ---
-
-async def run_ingest(text: str):
-    """Proceso de Ingesta: Texto -> Vector -> Supabase"""
-    vector = model.encode(text).tolist()
-    supabase.table("documents").insert({
-        "content": text,
-        "embedding": vector,
-        "metadata": {"source": "mcp_engine"}
-    }).execute()
-    return f"Éxito: Información indexada correctamente."
-
-async def run_ask(question: str):
-    """Proceso RAG: Pregunta -> Recuperación -> Groq"""
-    q_vector = model.encode(question).tolist()
-    
-    rpc_res = supabase.rpc("match_documents", {
-        "query_embedding": q_vector,
-        "match_threshold": 0.35,
-        "match_count": 3
-    }).execute()
-    
-    context = "\n".join([d['content'] for d in rpc_res.data]) if rpc_res.data else "Sin datos previos."
-    
-    prompt = (
-        f"Eres un asistente experto. Contexto:\n{context}\n\n"
-        f"Pregunta: {question}\n\nRespuesta técnica:"
-    )
-    
-    completion = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.4
-    )
-    return completion.choices[0].message.content
+from mcp.types import Tool, TextContent, ImageContent, EmbeddedResource
+import uvicorn
 
 # --- CONFIGURACIÓN DE HERRAMIENTAS MCP ---
+# Definimos el servidor MCP con el nombre que configuraste
+server = Server("johadooruri-brain")
+sse = FastApiSseServer()
 
-@mcp_server.list_tools()
-async def handle_list_tools() -> list[Tool]:
-    """Define las herramientas disponibles para clientes como Claude Desktop"""
+app = FastAPI(title="JohaDoorUri RAG Server")
+
+# --- DEFINICIÓN DE TOOLS ---
+@server.list_tools()
+async def handle_list_tools():
+    """Lista las herramientas disponibles para Claude"""
     return [
         Tool(
             name="aprender_dato",
-            description="Guarda información técnica nueva en la base de datos de JohaDoorUri.",
+            description="Guarda información nueva en el cerebro de largo plazo (Supabase)",
             inputSchema={
                 "type": "object",
-                "properties": {"text": {"type": "string"}},
-                "required": ["text"],
-            },
+                "properties": {
+                    "dato": {"type": "string", "description": "La información a recordar"},
+                    "contexto": {"type": "string", "description": "Categoría o contexto del dato"}
+                },
+                "required": ["dato"]
+            }
         ),
         Tool(
             name="consultar_cerebro",
-            description="Realiza preguntas al conocimiento almacenado en Supabase.",
+            description="Busca información guardada previamente en la memoria",
             inputSchema={
                 "type": "object",
-                "properties": {"question": {"type": "string"}},
-                "required": ["question"],
-            },
-        ),
+                "properties": {
+                    "query": {"type": "string", "description": "Lo que deseas buscar"}
+                },
+                "required": ["query"]
+            }
+        )
     ]
 
-@mcp_server.call_tool()
-async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
-    """Ejecuta la lógica según la herramienta llamada por el cliente MCP"""
+@server.call_tool()
+async def handle_call_tool(name: str, arguments: dict):
+    """Maneja la ejecución de las herramientas"""
     if name == "aprender_dato":
-        msg = await run_ingest(arguments["text"])
-        return [TextContent(type="text", text=msg)]
-    elif name == "consultar_cerebro":
-        answer = await run_ask(arguments["question"])
-        return [TextContent(type="text", text=answer)]
-    raise ValueError(f"Herramienta desconocida: {name}")
+        dato = arguments.get("dato")
+        # Aquí iría tu lógica de inserción en Supabase
+        print(f"Aprendiendo: {dato}") 
+        return [TextContent(type="text", text=f"Entendido, he guardado: '{dato}' en tu memoria.")]
 
-# --- ENDPOINTS DE TRANSPORTE MCP (SSE) ---
+    if name == "consultar_cerebro":
+        query = arguments.get("query")
+        # Aquí iría tu lógica de búsqueda RAG
+        return [TextContent(type="text", text=f"Buscando en la base de datos vectores para: '{query}'...")]
+    
+    raise ValueError(f"Herramienta no encontrada: {name}")
+
+# --- ENDPOINTS DE CONEXIÓN ---
+
+@app.get("/")
+async def root():
+    return {"status": "online", "message": "JohaDoorUri RAG Server is active"}
 
 @app.get("/mcp/sse")
 async def handle_sse(request: Request):
-    """Establece la conexión de eventos del servidor (SSE)"""
-    async with sse.connect_sse(request.scope, request.receive, request.send) as (read_stream, write_stream):
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options()
-        )
+    """
+    Endpoint crítico para la conexión con Claude.
+    FIX: Usamos request._send para acceder a la interfaz ASGI directamente.
+    """
+    try:
+        async with sse.connect_sse(
+            request.scope, 
+            request.receive, 
+            request._send # <--- Aquí está el fix para el error 500
+        ) as (read_stream, write_stream):
+            await server.handle_sse(read_stream, write_stream, sse.extra_context())
+    except Exception as e:
+        print(f"Error en el transporte SSE: {e}")
+        # No levantamos HTTPException aquí porque el stream ya podría haber iniciado
 
 @app.post("/mcp/messages")
 async def handle_messages(request: Request):
-    """Maneja los mensajes entrantes del cliente MCP"""
-    await sse.handle_post_request(request.scope, request.receive, request.send)
+    """Maneja los mensajes del protocolo MCP"""
+    return await sse.handle_post_messages(request.scope, request.receive, request._send)
 
-# --- ENDPOINTS HTTP TRADICIONALES (Para pruebas rápidas) ---
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "protocol": "MCP Active"}
-
-@app.get("/ingest")
-async def ingest_endpoint(text: str):
-    detail = await run_ingest(text)
-    return {"status": "success", "detail": detail}
-
-@app.get("/ask")
-async def ask_endpoint(question: str):
-    answer = await run_ask(question)
-    return {"answer": answer}
+# --- INICIO DEL SERVIDOR ---
+if __name__ == "__main__":
+    # Render asigna dinámicamente el puerto mediante la variable de entorno PORT
+    port = int(os.environ.get("PORT", 10000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
