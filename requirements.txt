@@ -4,4 +4,4 @@ supabase
 groq
 sentence-transformers
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.2.1+cpu
+torch
