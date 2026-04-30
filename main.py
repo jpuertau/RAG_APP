@@ -44,7 +44,7 @@ def health():
     """Ruta de verificación para que Render mantenga el servicio activo"""
     return {"status": "ok"}
 
-@app.post("/ingest")
+@app.get("/ingest")
 async def ingest_text(text: str):
     """Convierte texto en vectores y lo guarda en la base de datos Supabase"""
     if not text:
