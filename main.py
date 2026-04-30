@@ -16,7 +16,7 @@ groq_client = Groq(api_key=GROQ_API_KEY)
 
 # 3. Cargar el modelo (esto puede tardar, lo ponemos fuera de las rutas)
 # Usamos un modelo aún más pequeño para asegurar que quepa en la RAM de Render
-model = SentenceTransformer('paraphrase-MiniLM-L3-v2')
+model = SentenceTransformer('paraphrase-albert-small-v2')
 
 app = FastAPI()
 
