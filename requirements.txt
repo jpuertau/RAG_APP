@@ -5,5 +5,5 @@ groq
 sentence-transformers
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch
-mcp
+mcp[cli,server]>=1.0.0
 sse-starlette

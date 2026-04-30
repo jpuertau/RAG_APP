@@ -1,6 +1,6 @@
 import os
 from fastapi import FastAPI
-from mcp.server.fastapi import FastApiSseServer
+from mcp.server.sse import SseServerTransport
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 
